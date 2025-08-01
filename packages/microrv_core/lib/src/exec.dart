@@ -1,5 +1,6 @@
 import 'package:rohd/rohd.dart';
 import 'package:rohd_hcl/rohd_hcl.dart';
+import 'write_back.dart';
 
 enum MicroRVOpcode {
   lui(0x37),
@@ -39,7 +40,12 @@ Logic sltu(Logic a, Logic b) {
 }
 
 class MicroRVExecutor extends Module {
+  Logic get result => output('result');
+  Logic get target => output('target');
+  Logic get targetAddr => output('targetAddr');
+
   MicroRVExecutor({
+    required Logic clk,
     required Logic opcode,
     required Logic rd,
     required Logic funct3,
@@ -47,7 +53,6 @@ class MicroRVExecutor extends Module {
     required Logic rs2,
     required Logic funct7,
     required Logic imm_i,
-    required DataPortInterface regWritePort,
     required DataPortInterface regReadPort1,
     required DataPortInterface regReadPort2,
   }) : super(name: 'MicroRVExecutor') {
@@ -60,76 +65,90 @@ class MicroRVExecutor extends Module {
 
     imm_i = addInput('imm_i', imm_i, width: 32);
 
-    regWritePort = DataPortInterface(32, 5)
-      ..connectIO(this, regWritePort,
-        outputTags: {DataPortGroup.data, DataPortGroup.control},
-        uniquify: (original) => 'regWritePort_${original}',
-      );
+    addOutput('result', width: 32);
+    addOutput('target', width: MicroRVWriteBackTarget.width);
+    addOutput('targetAddr', width: 5);
 
-    regReadPort1 = DataPortInterface(32, 5)
-      ..connectIO(this, regReadPort1,
-        outputTags: {DataPortGroup.control},
-        inputTags: {DataPortGroup.data}, 
-        uniquify: (original) => 'regReadPort1_${original}',
-      );
+    regReadPort1 = DataPortInterface(32, 5)..connectIO(
+      this,
+      regReadPort1,
+      outputTags: {DataPortGroup.control},
+      inputTags: {DataPortGroup.data},
+      uniquify: (original) => 'regReadPort1_${original}',
+    );
 
-    regReadPort2 = DataPortInterface(32, 5)
-      ..connectIO(this, regReadPort2,
-        outputTags: {DataPortGroup.control},
-        inputTags: {DataPortGroup.data},
-        uniquify: (original) => 'regReadPort2_${original}',
-      );
+    regReadPort2 = DataPortInterface(32, 5)..connectIO(
+      this,
+      regReadPort2,
+      outputTags: {DataPortGroup.control},
+      inputTags: {DataPortGroup.data},
+      uniquify: (original) => 'regReadPort2_${original}',
+    );
 
-    final result = Logic(name: 'result', width: 32);
+    final resultVal = Logic(name: 'result', width: 32);
+    result <= resultVal;
+
+    final targetVal = Logic(
+      name: 'target',
+      width: MicroRVWriteBackTarget.width,
+    );
+    target <= targetVal;
+
+    final targetAddrVal = Logic(name: 'targetAddr', width: 5);
+    targetAddr <= targetAddrVal;
 
     Combinational([
       If.block([
         Iff(opcode.eq(MicroRVOpcode.imm.logic), [
+          targetVal < MicroRVWriteBackTarget.reg.index,
+          targetAddrVal < rd,
           regReadPort1.en < 1,
           regReadPort1.addr < rs1,
           If.block([
             Iff(funct3.eq(Const(0, width: 3)), [
-              result < regReadPort1.data + imm_i,
+              resultVal < regReadPort1.data + imm_i,
             ]),
             Iff(funct3.eq(Const(1, width: 3)), [
-              result < (regReadPort1.data << imm_i),
+              resultVal < regReadPort1.data << imm_i.slice(4, 0),
             ]),
             Iff(funct3.eq(Const(2, width: 3)), [
-              result < mux(regReadPort1.data[31] ^ imm_i[31], regReadPort1.data[31], regReadPort1.data[31].lt(imm_i[31])).zeroExtend(32),
+              resultVal <
+                  mux(
+                    regReadPort1.data[31] ^ imm_i[31],
+                    regReadPort1.data[31],
+                    regReadPort1.data[31].lt(imm_i[31]),
+                  ).zeroExtend(32),
             ]),
             Iff(funct3.eq(Const(3, width: 3)), [
-              result < sltu(regReadPort1.data, imm_i).zeroExtend(32),
+              resultVal < sltu(regReadPort1.data, imm_i).zeroExtend(32),
             ]),
             Iff(funct3.eq(Const(4, width: 3)), [
-              result < regReadPort1.data ^ imm_i,
+              resultVal < regReadPort1.data ^ imm_i,
             ]),
             Iff(funct3.eq(Const(5, width: 3)), [
               If.block([
                 Iff(funct7.eq(Const(0, width: 7)), [
-                  result < regReadPort1.data >> imm_i.slice(4, 0),
+                  resultVal < regReadPort1.data >> imm_i.slice(4, 0),
                 ]),
                 Iff(funct7.eq(Const(32, width: 7)), [
-                  result < mux(regReadPort1.data[31], Const(-1, width: 32) << (Const(32, width: 32) - (regReadPort1.data >> imm_i.slice(4, 0))), regReadPort1.data >> imm_i.slice(4, 0)),
+                  resultVal <
+                      mux(
+                        regReadPort1.data[31],
+                        Const(-1, width: 32) <<
+                            (Const(32, width: 32) -
+                                (regReadPort1.data >> imm_i.slice(4, 0))),
+                        regReadPort1.data >> imm_i.slice(4, 0),
+                      ),
                 ]),
                 // TODO: illegal instruction
               ]),
-              result < regReadPort1.data ^ imm_i,
+              resultVal < regReadPort1.data ^ imm_i,
             ]),
           ]),
           // TODO: illegal instruction
         ]),
       ]),
       // TODO: illegal instruction
-    ]);
-
-    Combinational([
-      If.block([
-        Iff(opcode.eq(MicroRVOpcode.imm.logic), [
-          regWritePort.en < 1,
-          regWritePort.addr < rd,
-          regWritePort.data < result,
-        ]),
-      ]),
     ]);
   }
 }

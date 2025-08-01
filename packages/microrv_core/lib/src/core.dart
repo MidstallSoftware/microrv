@@ -3,6 +3,7 @@ import 'package:rohd_hcl/rohd_hcl.dart';
 
 import 'decoder.dart';
 import 'exec.dart';
+import 'write_back.dart';
 
 enum MicroRVRegister {
   zero,
@@ -43,6 +44,7 @@ class MicroRVCore extends Module {
   late RegisterFile regFile;
   late MicroRVDecoder decoder;
   late MicroRVExecutor exec;
+  late MicroRVWriteBack wb;
 
   late DataPortInterface regWritePort;
   late DataPortInterface regReadPort1;
@@ -120,7 +122,9 @@ class MicroRVCore extends Module {
     regReadPort1 = DataPortInterface(32, 5);
     regReadPort2 = DataPortInterface(32, 5);
 
-    regFile = RegisterFile(clk, reset,
+    regFile = RegisterFile(
+      clk,
+      reset,
       [regWritePort],
       [regReadPort1, regReadPort2],
       numEntries: MicroRVRegister.values.length,
@@ -146,16 +150,14 @@ class MicroRVCore extends Module {
           next_ir < imem_data,
           next_pc < pc_reg.q + Const(4, width: 32),
         ]),
-        Else([
-          next_ir < ir_reg.q,
-          next_pc < pc_reg.q,
-        ]),
+        Else([next_ir < ir_reg.q, next_pc < pc_reg.q]),
       ]),
     ]);
 
     decoder = MicroRVDecoder(next_ir);
 
     exec = MicroRVExecutor(
+      clk: clk,
       opcode: decoder.opcode,
       rd: decoder.rd,
       funct3: decoder.funct3,
@@ -163,14 +165,19 @@ class MicroRVCore extends Module {
       rs2: decoder.rs2,
       funct7: decoder.funct7,
       imm_i: decoder.imm_i,
-      regWritePort: regWritePort,
       regReadPort1: regReadPort1,
       regReadPort2: regReadPort2,
     );
+
+    wb = MicroRVWriteBack(
+      result: exec.result,
+      target: exec.target,
+      targetAddr: exec.targetAddr,
+      regWritePort: regWritePort,
+    );
   }
 
-  String toStateString() =>
-    """
+  String toStateString() => """
 PC: ${pc.value}
 IR: ${ir.value}
 Instruction:

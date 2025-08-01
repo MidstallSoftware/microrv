@@ -26,15 +26,20 @@ class MicroRVROM extends Module {
     Combinational([
       If.block([
         Iff(en, [
-          Case(addr, program.entries.map((entry) => CaseItem(Const(entry.key, width: addr.width), [
-            dataOut < Const(entry.value, width: 32),
-            validBit < Const(1),
-          ])).toList()),
+          Case(
+            addr,
+            program.entries
+                .map(
+                  (entry) => CaseItem(Const(entry.key, width: addr.width), [
+                    dataOut < Const(entry.value, width: 32),
+                    validBit < Const(1),
+                  ]),
+                )
+                .toList(),
+            defaultItem: [dataOut < Const(0, width: 32), validBit < Const(0)],
+          ),
         ]),
-        Else([
-          dataOut < Const(0, width: 32),
-          validBit < Const(0),
-        ]),
+        Else([dataOut < Const(0, width: 32), validBit < Const(0)]),
       ]),
     ]);
 

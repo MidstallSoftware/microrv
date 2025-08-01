@@ -49,9 +49,7 @@ class MicroRVDecoder extends Module {
       funct7Value < ir.slice(31, 25),
     ]);
 
-    Combinational([
-      immIValue < ir.slice(31, 20).signExtend(32),
-    ]);
+    Combinational([immIValue < ir.slice(31, 20).signExtend(32)]);
   }
 
   String toStateString() => """
