@@ -28,7 +28,34 @@ enum MicroRVOpcode {
   }
 }
 
-Logic sltu(Logic a, Logic b) {
+enum MicroRVInstruction {
+  addi(MicroRVOpcode.imm, 0, null),
+  slli(MicroRVOpcode.imm, 0x1, 0),
+  slti(MicroRVOpcode.imm, 0x2, null),
+  sltiu(MicroRVOpcode.imm, 0x3, null),
+  srli(MicroRVOpcode.imm, 0x5, 0),
+  srai(MicroRVOpcode.imm, 0x5, 0x20),
+  xori(MicroRVOpcode.imm, 0x4, 0),
+  ori(MicroRVOpcode.imm, 0x6, null),
+  andi(MicroRVOpcode.imm, 0x7, null);
+
+  const MicroRVInstruction(this.opcode, this.funct3, this.funct7);
+
+  final MicroRVOpcode opcode;
+  final int funct3;
+  final int? funct7;
+
+  LogicValue get value => LogicValue.ofIterable([
+    LogicValue.ofInt(opcode.index, 7),
+    LogicValue.ofInt(funct3, 3),
+    LogicValue.ofInt(funct7 ?? 0, 7),
+  ]);
+
+  static List<MicroRVInstruction> get ignoreFunct7Set =>
+      MicroRVInstruction.values.where((i) => i.funct7 == null).toList();
+}
+
+Logic _sltiu(Logic a, Logic b) {
   Logic result = Const(0, width: 1);
   for (int i = 0; i < a.width; i++) {
     final abit = a[i];
@@ -39,10 +66,28 @@ Logic sltu(Logic a, Logic b) {
   return result;
 }
 
+Logic _arithmeticRightShift(Logic value, Logic shamt) {
+  final width = value.width;
+  final msb = value[width - 1];
+  final shifted = value >> shamt;
+
+  final fillMask = Logic(name: 'fillMask', width: width);
+  fillMask.inject(LogicValue.filled(width, msb.value));
+
+  final one = Const(1, width: width);
+  final shiftedOnes = one << shamt;
+  final dynamicMask = ~(shiftedOnes - Const(1, width: width));
+
+  final signFill = fillMask & dynamicMask;
+  return shifted | signFill;
+}
+
 class MicroRVExecutor extends Module {
+  Logic get enable => output('enable');
   Logic get result => output('result');
   Logic get target => output('target');
   Logic get targetAddr => output('targetAddr');
+  Logic get valid => output('valid');
 
   MicroRVExecutor({
     required Logic clk,
@@ -65,9 +110,11 @@ class MicroRVExecutor extends Module {
 
     imm_i = addInput('imm_i', imm_i, width: 32);
 
+    addOutput('enable');
     addOutput('result', width: 32);
     addOutput('target', width: MicroRVWriteBackTarget.width);
-    addOutput('targetAddr', width: 5);
+    addOutput('targetAddr', width: 32);
+    addOutput('valid');
 
     regReadPort1 = DataPortInterface(32, 5)..connectIO(
       this,
@@ -85,6 +132,9 @@ class MicroRVExecutor extends Module {
       uniquify: (original) => 'regReadPort2_${original}',
     );
 
+    final enableVal = Logic(name: 'enable');
+    enable <= enableVal;
+
     final resultVal = Logic(name: 'result', width: 32);
     result <= resultVal;
 
@@ -94,61 +144,177 @@ class MicroRVExecutor extends Module {
     );
     target <= targetVal;
 
-    final targetAddrVal = Logic(name: 'targetAddr', width: 5);
+    final targetAddrVal = Logic(name: 'targetAddr', width: 32);
     targetAddr <= targetAddrVal;
 
+    final validVal = Logic(name: 'valid');
+    valid <= validVal;
+
+    final ignoreFunct7 = Logic(name: 'ignoreFunct7');
+
     Combinational([
-      If.block([
-        Iff(opcode.eq(MicroRVOpcode.imm.logic), [
-          targetVal < MicroRVWriteBackTarget.reg.index,
-          targetAddrVal < rd,
-          regReadPort1.en < 1,
-          regReadPort1.addr < rs1,
-          If.block([
-            Iff(funct3.eq(Const(0, width: 3)), [
-              resultVal < regReadPort1.data + imm_i,
-            ]),
-            Iff(funct3.eq(Const(1, width: 3)), [
-              resultVal < regReadPort1.data << imm_i.slice(4, 0),
-            ]),
-            Iff(funct3.eq(Const(2, width: 3)), [
-              resultVal <
-                  mux(
-                    regReadPort1.data[31] ^ imm_i[31],
-                    regReadPort1.data[31],
-                    regReadPort1.data[31].lt(imm_i[31]),
-                  ).zeroExtend(32),
-            ]),
-            Iff(funct3.eq(Const(3, width: 3)), [
-              resultVal < sltu(regReadPort1.data, imm_i).zeroExtend(32),
-            ]),
-            Iff(funct3.eq(Const(4, width: 3)), [
-              resultVal < regReadPort1.data ^ imm_i,
-            ]),
-            Iff(funct3.eq(Const(5, width: 3)), [
-              If.block([
-                Iff(funct7.eq(Const(0, width: 7)), [
-                  resultVal < regReadPort1.data >> imm_i.slice(4, 0),
-                ]),
-                Iff(funct7.eq(Const(32, width: 7)), [
-                  resultVal <
-                      mux(
-                        regReadPort1.data[31],
-                        Const(-1, width: 32) <<
-                            (Const(32, width: 32) -
-                                (regReadPort1.data >> imm_i.slice(4, 0))),
-                        regReadPort1.data >> imm_i.slice(4, 0),
-                      ),
-                ]),
-                // TODO: illegal instruction
-              ]),
-              resultVal < regReadPort1.data ^ imm_i,
-            ]),
+      Case(
+        [opcode, funct3].swizzle(),
+        MicroRVInstruction.ignoreFunct7Set
+            .map(
+              (i) => CaseItem(Const(i.value.slice(9, 0)), [ignoreFunct7 < 1]),
+            )
+            .toList(),
+        defaultItem: [ignoreFunct7 < 0],
+      ),
+    ]);
+
+    final funct7Check = Logic(name: 'funct7Check', width: 7);
+
+    funct7Check <= mux(ignoreFunct7, Const(0, width: 7), funct7);
+
+    final instr = [opcode, funct3, funct7Check].swizzle();
+
+    Combinational([
+      Case(
+        instr,
+        [
+          CaseItem(Const(MicroRVInstruction.addi.value), [
+            regReadPort1.en < 1,
+            regReadPort1.addr < rs1,
+            resultVal < regReadPort1.data + imm_i,
+            targetVal <
+                Const(
+                  MicroRVWriteBackTarget.reg.index,
+                  width: MicroRVWriteBackTarget.width,
+                ),
+            targetAddrVal < rd.zeroExtend(32),
+            enableVal < 1,
+            validVal < 1,
           ]),
-          // TODO: illegal instruction
-        ]),
-      ]),
-      // TODO: illegal instruction
+          CaseItem(Const(MicroRVInstruction.slli.value), [
+            regReadPort1.en < 1,
+            regReadPort1.addr < rs1,
+            resultVal < regReadPort1.data << imm_i.slice(4, 0),
+            targetVal <
+                Const(
+                  MicroRVWriteBackTarget.reg.index,
+                  width: MicroRVWriteBackTarget.width,
+                ),
+            targetAddrVal < rd.zeroExtend(32),
+            enableVal < 1,
+            validVal < 1,
+          ]),
+          CaseItem(Const(MicroRVInstruction.slti.value), [
+            regReadPort1.en < 1,
+            regReadPort1.addr < rs1,
+            resultVal <
+                mux(
+                  regReadPort1.data[31] ^ imm_i[31],
+                  regReadPort1.data[31],
+                  regReadPort1.data.lt(imm_i),
+                ).zeroExtend(32),
+            targetVal <
+                Const(
+                  MicroRVWriteBackTarget.reg.index,
+                  width: MicroRVWriteBackTarget.width,
+                ),
+            targetAddrVal < rd.zeroExtend(32),
+            enableVal < 1,
+            validVal < 1,
+          ]),
+          CaseItem(Const(MicroRVInstruction.sltiu.value), [
+            regReadPort1.en < 1,
+            regReadPort1.addr < rs1,
+            resultVal < _sltiu(regReadPort1.data, imm_i).zeroExtend(32),
+            targetVal <
+                Const(
+                  MicroRVWriteBackTarget.reg.index,
+                  width: MicroRVWriteBackTarget.width,
+                ),
+            targetAddrVal < rd.zeroExtend(32),
+            enableVal < 1,
+            validVal < 1,
+          ]),
+          CaseItem(Const(MicroRVInstruction.srli.value), [
+            regReadPort1.en < 1,
+            regReadPort1.addr < rs1,
+            resultVal < regReadPort1.data >> imm_i.slice(4, 0),
+            targetVal <
+                Const(
+                  MicroRVWriteBackTarget.reg.index,
+                  width: MicroRVWriteBackTarget.width,
+                ),
+            targetAddrVal < rd.zeroExtend(32),
+            enableVal < 1,
+            validVal < 1,
+          ]),
+          CaseItem(Const(MicroRVInstruction.srai.value), [
+            regReadPort1.en < 1,
+            regReadPort1.addr < rs1,
+            resultVal <
+                _arithmeticRightShift(regReadPort1.data, imm_i.slice(4, 0)),
+            targetVal <
+                Const(
+                  MicroRVWriteBackTarget.reg.index,
+                  width: MicroRVWriteBackTarget.width,
+                ),
+            targetAddrVal < rd.zeroExtend(32),
+            enableVal < 1,
+            validVal < 1,
+          ]),
+          CaseItem(Const(MicroRVInstruction.xori.value), [
+            regReadPort1.en < 1,
+            regReadPort1.addr < rs1,
+            resultVal < regReadPort1.data ^ imm_i,
+            targetVal <
+                Const(
+                  MicroRVWriteBackTarget.reg.index,
+                  width: MicroRVWriteBackTarget.width,
+                ),
+            targetAddrVal < rd.zeroExtend(32),
+            enableVal < 1,
+            validVal < 1,
+          ]),
+          CaseItem(Const(MicroRVInstruction.ori.value), [
+            regReadPort1.en < 1,
+            regReadPort1.addr < rs1,
+            resultVal < regReadPort1.data | imm_i,
+            targetVal <
+                Const(
+                  MicroRVWriteBackTarget.reg.index,
+                  width: MicroRVWriteBackTarget.width,
+                ),
+            targetAddrVal < rd.zeroExtend(32),
+            enableVal < 1,
+            validVal < 1,
+          ]),
+          CaseItem(Const(MicroRVInstruction.andi.value), [
+            regReadPort1.en < 1,
+            regReadPort1.addr < rs1,
+            resultVal < regReadPort1.data & imm_i,
+            targetVal <
+                Const(
+                  MicroRVWriteBackTarget.reg.index,
+                  width: MicroRVWriteBackTarget.width,
+                ),
+            targetAddrVal < rd.zeroExtend(32),
+            enableVal < 1,
+            validVal < 1,
+          ]),
+        ],
+        defaultItem: [
+          enableVal < 0,
+          validVal < 0,
+          targetVal < 0,
+          targetAddrVal < 0,
+          resultVal < 0,
+          regReadPort1.en < 0,
+          regReadPort1.addr < 0,
+        ],
+      ),
     ]);
   }
+
+  String toStateString() => """
+Enable: ${enable.value}
+Result: ${result.value}
+Target: ${target.value}
+Target Address: ${targetAddr.value}
+Valid: ${valid.value}""";
 }

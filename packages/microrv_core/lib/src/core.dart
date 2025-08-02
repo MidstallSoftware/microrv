@@ -3,6 +3,7 @@ import 'package:rohd_hcl/rohd_hcl.dart';
 
 import 'decoder.dart';
 import 'exec.dart';
+import 'fetch.dart';
 import 'write_back.dart';
 
 enum MicroRVRegister {
@@ -42,6 +43,7 @@ enum MicroRVRegister {
 
 class MicroRVCore extends Module {
   late RegisterFile regFile;
+  late MicroRVFetcher fetcher;
   late MicroRVDecoder decoder;
   late MicroRVExecutor exec;
   late MicroRVWriteBack wb;
@@ -50,11 +52,8 @@ class MicroRVCore extends Module {
   late DataPortInterface regReadPort1;
   late DataPortInterface regReadPort2;
 
-  Logic get pc => output('pc');
-  Logic get ir => output('ir');
-
+  Logic get imem_en => output('imem_en');
   Logic get imem_addr => output('imem_addr');
-  Logic get imem_ready => output('imem_ready');
 
   Logic get dmem_addr => output('dmem_addr');
   Logic get dmem_wdata => output('dmem_wdata');
@@ -84,7 +83,6 @@ class MicroRVCore extends Module {
   MicroRVCore({
     required Logic clk,
     required Logic reset,
-    required Logic imem_en,
     required Logic imem_valid,
     required Logic imem_data,
     required Logic dmem_rdata,
@@ -95,19 +93,14 @@ class MicroRVCore extends Module {
     reset = addInput('reset', reset);
 
     // Instruction & data memory inputs
-    imem_en = addInput('imem_en', imem_en);
     imem_valid = addInput('imem_valid', imem_valid);
     imem_data = addInput('imem_data', imem_data, width: 32);
     dmem_rdata = addInput('dmem_rdata', dmem_rdata, width: 32);
     dmem_ready = addInput('dmem_ready', dmem_ready);
 
-    // Program counter & instruction register output
-    addOutput('pc', width: 32);
-    addOutput('ir', width: 32);
-
     // Instruction memory output
+    addOutput('imem_en');
     addOutput('imem_addr', width: 32);
-    addOutput('imem_ready');
 
     // Data memory output
     addOutput('dmem_addr', width: 32);
@@ -117,6 +110,8 @@ class MicroRVCore extends Module {
     addOutput('dmem_mask', width: 4);
     addOutput('dmem_valid');
 
+    final resetSync = FlipFlop(clk, reset, name: 'reset_sync').q;
+
     // Register file
     regWritePort = DataPortInterface(32, 5);
     regReadPort1 = DataPortInterface(32, 5);
@@ -124,37 +119,26 @@ class MicroRVCore extends Module {
 
     regFile = RegisterFile(
       clk,
-      reset,
+      resetSync,
       [regWritePort],
       [regReadPort1, regReadPort2],
       numEntries: MicroRVRegister.values.length,
       name: 'MicroRVRegisterFile',
     );
 
-    // Program counter setup
-    final next_pc = Logic(name: 'next_pc', width: 32);
-    final pc_reg = FlipFlop(clk, next_pc, reset: reset, name: 'pc_reg');
+    fetcher = MicroRVFetcher(
+      clk: clk,
+      reset: reset,
+      imem_data: imem_data,
+      imem_valid: imem_valid,
+      enable: Const(1),
+      stall: Const(0),
+    );
 
-    imem_en.put(1);
-    pc <= pc_reg.q;
-    imem_addr <= pc_reg.q;
+    imem_addr <= fetcher.imem_addr;
+    imem_en <= fetcher.imem_en;
 
-    // Instruction register
-    final next_ir = Logic(name: 'next_ir', width: 32);
-    final ir_reg = FlipFlop(clk, next_ir, reset: reset, name: 'ir_reg');
-    ir <= ir_reg.q;
-
-    Combinational([
-      If.block([
-        Iff(imem_valid, [
-          next_ir < imem_data,
-          next_pc < pc_reg.q + Const(4, width: 32),
-        ]),
-        Else([next_ir < ir_reg.q, next_pc < pc_reg.q]),
-      ]),
-    ]);
-
-    decoder = MicroRVDecoder(next_ir);
+    decoder = MicroRVDecoder(fetcher.ir);
 
     exec = MicroRVExecutor(
       clk: clk,
@@ -170,6 +154,9 @@ class MicroRVCore extends Module {
     );
 
     wb = MicroRVWriteBack(
+      clk: clk,
+      reset: reset,
+      enable: exec.enable,
       result: exec.result,
       target: exec.target,
       targetAddr: exec.targetAddr,
@@ -178,14 +165,18 @@ class MicroRVCore extends Module {
   }
 
   String toStateString() => """
-PC: ${pc.value}
-IR: ${ir.value}
-Instruction:
+Instruction Memory:
+- Enable ${imem_en.value}
+- Address: ${imem_addr.value}
+
+Fetcher:
+${fetcher.toStateString().split('\n').map((line) => '- $line').join('\n')}
+
+Decoder:
 ${decoder.toStateString().split('\n').map((line) => '- $line').join('\n')}
 
-Instruction Memory:
-- Address: ${imem_addr.value}
-- Ready: ${imem_ready.value}
+Executor:
+${exec.toStateString().split('\n').map((line) => '- $line').join('\n')}
 
 Registers:
 ${MicroRVRegister.values.map((reg) => '- ${reg.name}: ${regFile.getData(LogicValue.ofInt(reg.index, 5))}').join('\n')}""";

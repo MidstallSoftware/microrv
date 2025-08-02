@@ -9,6 +9,7 @@ class MicroRVROM extends Module {
 
   MicroRVROM({
     required Logic clk,
+    required Logic reset,
     required Logic en,
     required Logic addr,
     this.program = const {0: 12},
@@ -23,9 +24,14 @@ class MicroRVROM extends Module {
     addInput('en', en);
     addInput('addr', addr, width: addr.width);
 
+    final enableLatch = FlipFlop(clk, en, reset: reset);
+
+    data <= dataOut;
+    valid <= validBit;
+
     Combinational([
       If.block([
-        Iff(en, [
+        Iff(enableLatch.q, [
           Case(
             addr,
             program.entries
@@ -42,8 +48,9 @@ class MicroRVROM extends Module {
         Else([dataOut < Const(0, width: 32), validBit < Const(0)]),
       ]),
     ]);
-
-    data <= dataOut;
-    valid <= validBit;
   }
+
+  String toStateString() => """
+Data: ${data.value}
+Valid: ${valid.value}""";
 }
